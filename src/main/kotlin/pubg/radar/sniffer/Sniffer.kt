@@ -12,9 +12,11 @@ import pubg.radar.util.notify
 import java.io.*
 import java.io.File.separator
 import java.net.Inet4Address
+import java.nio.charset.Charset
 import java.util.*
 import javax.swing.*
 import javax.swing.JOptionPane.*
+import javax.xml.bind.DatatypeConverter
 import kotlin.collections.ArrayList
 import kotlin.concurrent.thread
 import kotlin.experimental.and
@@ -33,7 +35,8 @@ class DevDesc(val dev: PcapNetworkInterface, val address: Inet4Address) {
 
 enum class SniffOption {
   PortFilter,
-  PPTPFilter
+  PPTPFilter,
+  L2TPFilter,
 }
 
 val settingHome = "${System.getProperty("user.home")}$separator.pubgradar"
@@ -96,11 +99,14 @@ class Sniffer {
                                     !found || sniffOption == PortFilter)
       val routeIpFilter = JRadioButton("PPTP tunneling",
                                        found && sniffOption == PPTPFilter)
+      val l2tpFilter = JRadioButton("L2TP tunneling",
+              found && sniffOption == L2TPFilter)
       group.add(portFilter)
       group.add(routeIpFilter)
+      group.add(l2tpFilter)
       val netDevs = JComboBox(arrayChoices)
       if (found) netDevs.selectedItem = arrayChoices.firstOrNull { it.dev === nif }
-      val params = arrayOf(msg, netDevs, portFilter, routeIpFilter)
+      val params = arrayOf(msg, netDevs, portFilter, routeIpFilter,l2tpFilter)
       
       val option = showConfirmDialog(null, params, "Network interfaces", OK_CANCEL_OPTION)
       if (option == CANCEL_OPTION)
@@ -117,6 +123,7 @@ class Sniffer {
       when {
         portFilter.isSelected -> sniffOption = PortFilter
         routeIpFilter.isSelected -> sniffOption = PPTPFilter
+        l2tpFilter.isSelected -> sniffOption = L2TPFilter
       }
       
       try {
@@ -175,11 +182,39 @@ class Sniffer {
       val pppPkt = PppSelector.newPacket(raw, i, raw.size - i)
       return pppPkt.payload
     }
-    
+
+    fun parseL2TPPacket(raw: ByteArray): Packet? {
+      println(DatatypeConverter.printHexBinary(raw)+"  raw:"+raw.toString(Charset.defaultCharset()));
+      var i = 0
+      if (raw[i] != PPTPFlag) return null//PPTP
+      i++
+      val hasAck = (raw[i] and ACKFlag) != 0.toByte()
+      i++
+      val protocolType = raw.toIntBE(i, 2)
+      i += 2
+      if (protocolType != 0x880b) return null
+      val payloadLength = raw.toIntBE(i, 2)
+      i += 2
+      val callID = raw.toIntBE(i, 2)
+      i += 2
+      val seq = raw.toIntBE(i, 4)
+      i += 4
+      if (hasAck) {
+        val ack = raw.toIntBE(i, 4)
+        i += 4
+      }
+      if (raw[i] != 0x21.toByte()) return null//not ipv4
+      i--
+      raw[i] = 0
+      val pppPkt = PppSelector.newPacket(raw, i, raw.size - i)
+      return pppPkt.payload
+    }
+
     fun udp_payload(packet: Packet): UdpPacket? {
       return when (sniffOption) {
         PortFilter -> packet
         PPTPFilter -> parsePPTPGRE(packet[IpV4Packet::class.java].payload.rawData)
+        L2TPFilter -> parseL2TPPacket(packet[UdpPacket::class.java].payload.rawData)
         
       }?.get(UdpPacket::class.java)
     }
@@ -189,6 +224,7 @@ class Sniffer {
       val filter = when (sniffOption) {
         PortFilter -> "udp src portrange 7000-8999 or udp[4:2] = 52"
         PPTPFilter -> "ip[9]=47"
+        L2TPFilter -> "udp port 1701"
       }
       handle.setFilter(filter, OPTIMIZE)
       thread(isDaemon = true) {
@@ -198,6 +234,8 @@ class Sniffer {
             val ip = packet[IpPacket::class.java]
             val udp = udp_payload(packet) ?: return@loop
             val raw = udp.payload.rawData
+
+            println(ip.header.srcAddr);
             if (ip.header.srcAddr == localAddr) {
               if (raw.size == 44)
                 parseSelfLocation(raw)
@@ -221,6 +259,7 @@ class Sniffer {
               val ip = packet[IpPacket::class.java]
               val udp = udp_payload(packet) ?: continue
               val raw = udp.payload.rawData
+              println(ip.header.srcAddr);
               if (ip.header.srcAddr == localAddr) {
                 if (raw.size == 44)
                   parseSelfLocation(raw)
