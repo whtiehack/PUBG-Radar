@@ -99,7 +99,7 @@ class Sniffer {
                                     !found || sniffOption == PortFilter)
       val routeIpFilter = JRadioButton("PPTP tunneling",
                                        found && sniffOption == PPTPFilter)
-      val l2tpFilter = JRadioButton("L2TP tunneling",
+      val l2tpFilter = JRadioButton("L2TP protocal",
               found && sniffOption == L2TPFilter)
       group.add(portFilter)
       group.add(routeIpFilter)
@@ -184,29 +184,21 @@ class Sniffer {
     }
 
     fun parseL2TPPacket(raw: ByteArray): Packet? {
-      println(DatatypeConverter.printHexBinary(raw)+"  raw:"+raw.toString(Charset.defaultCharset()));
+
       var i = 0
-      if (raw[i] != PPTPFlag) return null//PPTP
-      i++
-      val hasAck = (raw[i] and ACKFlag) != 0.toByte()
-      i++
-      val protocolType = raw.toIntBE(i, 2)
-      i += 2
-      if (protocolType != 0x880b) return null
-      val payloadLength = raw.toIntBE(i, 2)
-      i += 2
-      val callID = raw.toIntBE(i, 2)
-      i += 2
-      val seq = raw.toIntBE(i, 4)
-      i += 4
-      if (hasAck) {
-        val ack = raw.toIntBE(i, 4)
-        i += 4
+      //control message return
+      val isControl = (raw[i] and 0b1000_0000.toByte()) != 0.toByte()
+      if(isControl){
+        return null;
       }
-      if (raw[i] != 0x21.toByte()) return null//not ipv4
-      i--
-      raw[i] = 0
+      // no length ,return
+      val hasLength = (raw[i] and 0b0100_0000.toByte()) != 0.toByte()
+      if(!hasLength){
+        return null;
+      }
+      i+=8;
       val pppPkt = PppSelector.newPacket(raw, i, raw.size - i)
+//     println(DatatypeConverter.printHexBinary(raw)+"  raw:"+raw.toString(Charset.defaultCharset()));
       return pppPkt.payload
     }
 
@@ -224,7 +216,7 @@ class Sniffer {
       val filter = when (sniffOption) {
         PortFilter -> "udp src portrange 7000-8999 or udp[4:2] = 52"
         PPTPFilter -> "ip[9]=47"
-        L2TPFilter -> "udp port 1701"
+        L2TPFilter -> "udp"
       }
       handle.setFilter(filter, OPTIMIZE)
       thread(isDaemon = true) {
@@ -232,10 +224,11 @@ class Sniffer {
           try {
             packet!!
             val ip = packet[IpPacket::class.java]
+
             val udp = udp_payload(packet) ?: return@loop
             val raw = udp.payload.rawData
 
-            println(ip.header.srcAddr);
+          //  println(ip.header.srcAddr);
             if (ip.header.srcAddr == localAddr) {
               if (raw.size == 44)
                 parseSelfLocation(raw)
